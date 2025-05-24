@@ -10,14 +10,19 @@
 
 #include "base64.hpp"
 
+#include <HTTPClient.h>
+#include <JPEGDecoder.h>
+
 #include "settings.h"
 
 #include "opensans8b.h"
+#include "opensans12b.h"
+#include "opensans18b.h"
+#include "opensans26b.h"
 
 String appVersion="1.0";
 
 GFXfont  currentFont;
-
 uint8_t *framebuffer;
 
 String ipaddr="";
@@ -52,7 +57,121 @@ void getAppVersion() {
                 serializeJson(doc1, buf1);
  
                 server.send(201, F("application/json"), buf1);
+        }
     }
+}
+
+void geturi() {
+  // Puffer für Bilddaten
+  #define MAX_IMAGE_SIZE  (200 * 1024)
+  uint8_t *imgBuffer = nullptr;
+
+  String postBody = server.arg("plain");
+  Serial.setTimeout(10000);
+  DynamicJsonDocument doc(10000);
+  DeserializationError error = deserializeJson(doc, postBody);
+    if (error) {
+        Serial.print(F("Error parsing JSON "));
+        Serial.println(error.c_str()); 
+        String msg = error.c_str();
+        server.send(400, F("text/html"),
+                "Error in parsin json body! <br>" + msg);
+    } else {
+        JsonObject postObj = doc.as<JsonObject>(); 
+        Serial.print(F("HTTP Method: "));
+        Serial.println(server.method()); 
+
+        if (server.method() == HTTP_POST) {
+            if (postObj.containsKey("name") && postObj.containsKey("uri")) {
+
+              const char* uri = postObj["uri"];
+
+// TODO
+              HTTPClient http;
+              http.begin(uri);
+              int status = http.GET();
+              if (status != HTTP_CODE_OK) {
+                Serial.printf("HTTP-Fehler: %d\n", status);
+                http.end();
+                return;
+              }
+
+              // Länge ermitteln und Puffer anlegen
+              int len = http.getSize();
+              if (len > MAX_IMAGE_SIZE) len = MAX_IMAGE_SIZE;
+              imgBuffer = (uint8_t*)malloc(len);
+              http.getStream().readBytes(imgBuffer, len);
+              http.end();
+
+              // JPEG decodieren
+              JpegDec.decodeArray(imgBuffer, len);
+              uint16_t w = JpegDec.width;
+              uint16_t h = JpegDec.height;
+
+              // Graustufen-Puffer anlegen
+              uint8_t *gray = (uint8_t*)malloc(w * h);
+              if (!gray) {
+                Serial.println("Kein RAM für gray");
+                free(imgBuffer);
+                return;
+              }
+
+              // Pixel auslesen und in Graustufen umwandeln
+              uint16_t *pImg;
+              int count = 0;
+              while (JpegDec.read()) {
+                pImg = JpegDec.pImage;              // 16-bit RGB565
+                for (int i = 0; i < (w * h); i++) {
+                  uint16_t px = pImg[i];
+                  uint8_t r = (px >> 11) & 0x1F;
+                  uint8_t g = (px >> 5)  & 0x3F;
+                  uint8_t b = px         & 0x1F;
+                  // einfache Graustufen‐Berechnung
+                  gray[count++] = (r*8*30 + g*4*59 + b*8*11) / 100;
+                }
+              }
+
+              Rect_t area = {
+                .x = (EPD_WIDTH - w) / 2,
+                .y = (EPD_HEIGHT - h) / 2,
+                .width = w,
+                .height = h
+              };
+
+              epd_poweron();
+              epd_clear();
+              epd_draw_grayscale_image(area, gray);
+              // epd_display(); // notwendig?
+              epd_poweroff();
+
+              free(gray);
+              free(imgBuffer);
+
+              Serial.println(F("done."));
+
+              DynamicJsonDocument doc1(512);
+              doc1["status"] = "OK";
+              doc1["message"] = F("Fine!");
+
+              Serial.print(F("Stream..."));
+              String buf1;
+              serializeJson(doc1, buf1);
+
+              server.send(201, F("application/json"), buf1);
+              Serial.print(F("done."));
+            }else {
+                DynamicJsonDocument doc(512);
+                doc["status"] = "KO";
+                doc["message"] = F("No data found, or incorrect!");
+ 
+                Serial.print(F("Stream..."));
+                String buf;
+                serializeJson(doc, buf);
+ 
+                server.send(400, F("application/json"), buf);
+                Serial.print(F("done."));
+            }
+        }
     }
 }
 
@@ -89,6 +208,16 @@ void turnOff() {
     }
 }
 
+void infoScreen() {
+  clearScreen();
+  setFont(OpenSans26B);
+  drawString(EPD_WIDTH/2,  50, "Welcome", CENTER);
+  setFont(OpenSans12B);
+  drawString(EPD_WIDTH/2, 150, "Connected to " + String(ssid), CENTER);
+  drawString(EPD_WIDTH/2, 250, "IP address: " + ipaddr, CENTER);
+  drawString(EPD_WIDTH/2, 350, "Ready, send image file...", CENTER);
+}
+
 void clearScreen() {
   String postBody = server.arg("plain");
   Serial.setTimeout(10000);
@@ -108,10 +237,7 @@ void clearScreen() {
             if (postObj.containsKey("name")) {
               //epd_poweron();
               epd_clear();
-              setFont(OpenSans8B);
-    drawString(10, 500, "Connected to "+String(ssid), LEFT);
-    drawString(310, 500, "IP address: "+ipaddr, LEFT);
-    drawString(610, 500, "Ready, send image file...", LEFT);
+// war textausgabe
               epd_poweroff();
             }
         }
@@ -126,6 +252,7 @@ void clearScreen() {
                 server.send(201, F("application/json"), buf1);
     }
 }
+
 void setImage() {
     String postBody = server.arg("plain");
     //Serial.println(postBody);
@@ -166,8 +293,8 @@ void setImage() {
                Rect_t area = {
                 .x = x,
                 .y = y,
-                .width = x2,
-                .height =  y2
+                .width  = x2,
+                .height = y2
               };
 
               epd_poweron();
@@ -176,32 +303,29 @@ void setImage() {
               }
               epd_draw_grayscale_image(area, (uint8_t *) raw);
               epd_poweroff();
-
  
-                Serial.println(F("done."));
+              Serial.println(F("done."));
 
+              DynamicJsonDocument doc1(512);
+              doc1["status"] = "OK";
+              doc1["message"] = F("Fine!");
 
-                DynamicJsonDocument doc1(512);
-                doc1["status"] = "OK";
-                doc1["message"] = F("Fine!");
- 
-                Serial.print(F("Stream..."));
-                String buf1;
-                serializeJson(doc1, buf1);
- 
-                server.send(201, F("application/json"), buf1);
-                Serial.print(F("done."));
+              Serial.print(F("Stream..."));
+              String buf1;
+              serializeJson(doc1, buf1);
 
+              server.send(201, F("application/json"), buf1);
+              Serial.print(F("done."));
  
-            }else {
+             } else {
                 DynamicJsonDocument doc(512);
                 doc["status"] = "KO";
                 doc["message"] = F("No data found, or incorrect!");
- 
+
                 Serial.print(F("Stream..."));
                 String buf;
                 serializeJson(doc, buf);
- 
+
                 server.send(400, F("application/json"), buf);
                 Serial.print(F("done."));
             }
@@ -218,6 +342,7 @@ void restServerRouting() {
     server.on(F("/clearScreen"), HTTP_POST, clearScreen);
     server.on(F("/turnOff"), HTTP_POST, turnOff);
     server.on(F("/appVersion"), HTTP_POST, getAppVersion);
+    server.on(F("/url"), HTTP_POST, geturi);
 }
 
 // Manage not found URL
@@ -239,40 +364,34 @@ void handleNotFound() {
 void setup(void) {
   Serial.begin(115200);
   
-    epd_init();
+  epd_init();
 
-    framebuffer = (uint8_t *)heap_caps_malloc(EPD_WIDTH * EPD_HEIGHT / 2, MALLOC_CAP_SPIRAM);
-    memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
+  framebuffer = (uint8_t *)heap_caps_malloc(EPD_WIDTH * EPD_HEIGHT / 2, MALLOC_CAP_SPIRAM);
+  memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
 
-    epd_poweron();
-    epd_clear();
-    
+  epd_poweron();
+  epd_clear();
+  
 
-    delay(3000);
+  delay(3000);
 
+  Serial.print("Verbinde mit: ");
+  Serial.println(ssid);
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
   Serial.println("");
  
   // Wait for connection
+  Serial.print("Hole IP ");
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
   Serial.println("");
-  Serial.print("Connected to ");
-  Serial.println(ssid);
-  Serial.print("IP address: ");
+  Serial.print("Eigene IP: ");
   Serial.println(WiFi.localIP());
   ipaddr=WiFi.localIP().toString();;
 
-    setFont(OpenSans8B);
-    drawString(10, 500, "Connected to "+String(ssid), LEFT);
-    drawString(310, 500, "IP address: "+ipaddr, LEFT);
-    drawString(610, 500, "Ready, send image file...", LEFT);
-
-    epd_poweroff();
- 
   // Activate mDNS this is used to be able to connect to the server
   // with local DNS hostmane esp8266.local
   if (MDNS.begin(mdnsname)) {
@@ -286,6 +405,8 @@ void setup(void) {
   // Start server
   server.begin();
   Serial.println("HTTP server started");
+
+  infoScreen();
 }
  
 void loop(void) {
