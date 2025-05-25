@@ -6,7 +6,7 @@ import os
 import sys
 import tempfile
 from html2image import Html2Image
-from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageEnhance, ImageFilter
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageEnhance, ImageFilter, ExifTags
 from io import BytesIO
 import time
 
@@ -28,7 +28,7 @@ def send_request(path: str, payload=None):
     url = f"{ESP_HOST}/{path}"
     try:
         if payload is not None:
-            res = requests.post(url, json=payload)
+            res = requests.post(url, json=payload, timeout=2)
         else:
             res = requests.post(url)
         res.raise_for_status()
@@ -120,14 +120,15 @@ def encode_and_send_pil(image: Image.Image, image_path: str, bright: float = 1.0
     offset_y = (max_height - height) // 2
 
     # Save processed image to out.png
+    canvas = Image.new("L", (max_width, max_height), color=255)
+    canvas.paste(image, (offset_x, offset_y))
     if DEBUG:
-        canvas = Image.new("L", (max_width, max_height), color=255)
-        canvas.paste(image, (offset_x, offset_y))
         canvas.save("out.png")
 
-    block_size = 100
+    block_size = 60 # TODO 100, aber ohne Fehler am Rand rechts und unten
 
     for y in range(0, max_height, block_size):
+        print(f"Block", end="")
         for x in range(0, max_width, block_size):
             box = (x, y, min(x + block_size, max_width), min(y + block_size, max_height))
             block = canvas.crop(box)
@@ -137,6 +138,9 @@ def encode_and_send_pil(image: Image.Image, image_path: str, bright: float = 1.0
                 padded = Image.new("L", (block_size, block_size), color=255)
                 padded.paste(block, (0, 0))
                 block = padded
+                print("padded")
+                # box = (x, y, min(x + block_size, max_width), min(y + block_size, max_height))
+                # block = canvas.crop(box)
 
             packed_data = pack_4bit_grayscale(block)
             encoded_image = base64.b64encode(packed_data).decode("ascii")
@@ -157,7 +161,7 @@ def encode_and_send_pil(image: Image.Image, image_path: str, bright: float = 1.0
                 print(response.text)
                 return
             else:
-                print(f"Block ({x},{y}) ", end="")
+                print(f" ({x},{y})", end="")
         print(f"sent successfully.")
 
 
@@ -230,6 +234,24 @@ def send_image_auto(image_path: str, bright: float = 1.0, gamma: float = 1.0, cr
     print(image_path)
     try:
         img = Image.open(image_path)
+
+        # Auto-rotate based on EXIF orientation
+        try:
+            for orientation in ExifTags.TAGS.keys():
+                if ExifTags.TAGS[orientation] == 'Orientation':
+                    break
+            exif = img._getexif()
+            if exif is not None:
+                orientation_value = exif.get(orientation)
+                if orientation_value == 3:
+                    img = img.rotate(90, expand=True)
+                elif orientation_value == 6:
+                    img = img.rotate(180, expand=True) # rechts oben
+                elif orientation_value == 8:
+                    img = img.rotate(270, expand=True)
+        except Exception as e:
+            print(f"EXIF-Rotation konnte nicht angewendet werden: {e}")
+
         encode_and_send_pil(img, os.path.basename(image_path), bright, gamma, crop)
     except Exception as e:
         print(f"Fehler beim Laden des Bildes: {e}")
